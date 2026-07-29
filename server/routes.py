@@ -2,9 +2,11 @@ import base64
 import json
 import re
 from typing import Annotated
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
+import httpx
 from fastapi import APIRouter, HTTPException, Path, Request
+from fastapi.responses import StreamingResponse
 
 from logger import logger
 from server.manifest import Manifest, get_manifest
@@ -41,6 +43,49 @@ async def manifest_endpoint_no_config(request: Request) -> Manifest:
     manifest.logo = str(request.base_url) + "logo.png"
     return manifest
 
+@router.get("/proxy/stream")
+async def proxy_stream(request: Request, d: str):
+    headers = {
+        "User-Agent": "okhttp/4.12.0",
+        "Accept": "*/*",
+    }
+    if "range" in request.headers:
+        headers["Range"] = request.headers["range"]
+
+    client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
+    try:
+        req = client.build_request("GET", d, headers=headers)
+        resp = await client.send(req, stream=True)
+
+        response_headers = {
+            "Content-Type": resp.headers.get("Content-Type", "video/mp4"),
+            "Accept-Ranges": "bytes",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
+        if "Content-Length" in resp.headers:
+            response_headers["Content-Length"] = resp.headers["Content-Length"]
+        if "Content-Range" in resp.headers:
+            response_headers["Content-Range"] = resp.headers["Content-Range"]
+
+        async def stream_generator():
+            try:
+                async for chunk in resp.aiter_bytes():
+                    yield chunk
+            finally:
+                await resp.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            stream_generator(),
+            status_code=resp.status_code,
+            headers=response_headers
+        )
+    except Exception as e:
+        await client.aclose()
+        logger.error(f"Proxy stream error for {d}: {e}")
+        raise HTTPException(status_code=502, detail="Stream proxy error")
+
 @router.get("/{config}/stream/{type}/{id}.json")
 async def stream_endpoint_with_config(
     request: Request,
@@ -48,16 +93,17 @@ async def stream_endpoint_with_config(
     type: Annotated[str, Path(...)],
     id: Annotated[str, Path(...)],
 ):
-    return await handle_stream(type, id, config)
+    return await handle_stream(request, type, id, config)
 
 @router.get("/stream/{type}/{id}.json")
 async def stream_endpoint(
+    request: Request,
     type: Annotated[str, Path(...)],
     id: Annotated[str, Path(...)],
 ):
-    return await handle_stream(type, id, "")
+    return await handle_stream(request, type, id, "")
 
-async def handle_stream(type: str, id: str, config_str: str):
+async def handle_stream(request: Request, type: str, id: str, config_str: str):
     logger.info(f"Received stream request: type={type}, id={id}")
     if type not in ["movie", "series"]:
         raise HTTPException(status_code=404, detail="Unsupported type")
@@ -118,6 +164,8 @@ async def handle_stream(type: str, id: str, config_str: str):
         else:
             merged_streams[base_dl_url]["audio_langs"].update(audio_langs)
 
+    base_url = str(request.base_url)
+
     streams = []
     for base_dl_url, data in merged_streams.items():
         dl = data["dl"]
@@ -159,12 +207,31 @@ async def handle_stream(type: str, id: str, config_str: str):
         if layout == "torrentio":
             desc = desc.replace(" | ", "\n")
 
+        # 1. Direct Stream with okhttp User-Agent proxyHeaders (for Stremio apps)
         streams.append({
             "name": name_str,
             "title": desc,
             "url": url_str,
             "behaviorHints": {
-                "notWebReady": True,
+                "notWebReady": False,
+                "filename": filename,
+                "proxyHeaders": {
+                    "request": {
+                        "User-Agent": "okhttp/4.12.0",
+                        "Accept": "*/*"
+                    }
+                }
+            },
+        })
+
+        # 2. Proxied Stream option via Addon Stream Proxy (for Web / CORS / clients blocking custom headers)
+        proxy_stream_url = f"{base_url}proxy/stream?d={quote(url_str)}"
+        streams.append({
+            "name": f"{name_str} [Proxy]",
+            "title": desc,
+            "url": proxy_stream_url,
+            "behaviorHints": {
+                "notWebReady": False,
                 "filename": filename,
             },
         })
