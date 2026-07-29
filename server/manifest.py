@@ -1,4 +1,9 @@
+import json
+
 from pydantic import BaseModel
+
+from config import settings
+
 
 class Manifest(BaseModel):
     id: str
@@ -13,12 +18,12 @@ class Manifest(BaseModel):
 
 def get_manifest() -> Manifest:
     return Manifest(
-        id="com.provider.addon",
-        version="1.0.0",
+        id="com.moviebox.addon",
+        version=settings.VERSION,
         name="MovieBox",
         description="Stream movies and TV series with multiple qualities, audio languages, and subtitles.",
         resources=["stream"],
         types=["movie", "series"],
         catalogs=[],
-        idPrefixes=["tt"]
+        idPrefixes=["tt"],
     )

@@ -1,88 +1,94 @@
-# Stremio MovieBox Addon
+# Stremio MovieBox
 
-Watch the massive MovieBox catalog directly from Stremio! This addon bridges MovieBox's internal APIs (Legacy, Web, and Mobile) straight into your Stremio experience, serving up high-quality streams with full audio dub and subtitle support.
+A lightweight and fast self hosted MovieBox addon for Stremio.
+
+## Overview
+
+This Stremio addon proxies and scrapes streams from MovieBox or ShowBox backend APIs and delivers them to your Stremio client. It is designed for simplicity, low overhead, and speed, making it suitable for self hosting in low resource environments.
 
 ## Features
 
-- **Blazing Fast Searches:** Concurrently scrapes multiple MovieBox APIs so you never miss a stream.
-- **Smart Grouping:** Intelligently merges identical streams and organizes them beautifully by resolution and language.
-- **Web UI Dashboard:** Customize exactly what you want to see—set minimum resolutions, prioritize your native language, and tweak layout styles through a sleek configuration page.
-- **Stremio Native:** Fully integrates with Stremio's Cinemeta system for perfect metadata matching.
+* **Movies & Series:** Supports Stremio Cinemeta metadata.
+* **Lightweight:** Minimal architecture with no unnecessary abstractions.
+* **Fast Resolution:** Asynchronous scraping from backend providers.
+* **Docker Ready:** Includes a multi stage Docker build for easy deployment.
 
----
+## Project Structure
 
-## Getting Started (Recommended)
+```text
+server/
+    app.py         # FastAPI application entrypoint
+    routes.py      # Stremio API endpoints
+    manifest.py    # Stremio Manifest configuration
+moviebox/
+    client.py      # HTTP Client handling proxying, signing, and tokens
+    crypto.py      # Utilities for request signing and hashing
+    parser.py      # Logic for parsing backend responses
+    models.py      # Minimal data models for validation
+streaming/
+    provider.py    # Matches Cinemeta data to MovieBox entries
+    metadata.py    # Fetches metadata from Cinemeta
+config.py          # Centralized configuration
+logger.py          # Standard structured logging
+```
 
-The absolute easiest way to run the addon is using Docker. You don't need to download the source code at all.
+## Self Hosting with Docker
 
-### Option A: Docker Run (Quickest)
-Just run this single command in your terminal:
+You can run the pre-built image from Docker Hub with a single command:
 
 ```bash
 docker run -d --name stremio-moviebox -p 8000:8000 --restart unless-stopped mesamirh/stremio-moviebox:latest
 ```
 
-### Option B: Docker Compose
-If you prefer `docker-compose`, create a `docker-compose.yml` file anywhere on your computer with the following content:
+Or, if you prefer using Docker Compose for local building:
 
-```yaml
-version: '3.8'
-services:
-  stremio-moviebox:
-    image: mesamirh/stremio-moviebox:latest
-    container_name: stremio-moviebox
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-```
-Then start it up with:
 ```bash
-docker-compose up -d
+docker compose up --detach --build
 ```
 
----
+The addon will be available at `http://localhost:8000`. To install it, paste `http://localhost:8000/manifest.json` into your Stremio search bar.
 
-## How to Install in Stremio
+## Environment Variables
 
-Once the Docker container is running, you need to add it to Stremio:
+You can customize the addon via Docker environment variables.
 
-1. Open your browser and go to: `http://127.0.0.1:8000/configure/` (or replace `127.0.0.1` with the IP address of your server).
-2. Tweak the settings to your liking (choose your preferred language, resolution limits, etc.).
-3. Click the **"Install Addon"** button at the bottom of the page to automatically link it to your Stremio app.
+<table>
+  <tr>
+    <th>Variable</th>
+    <th>Description</th>
+    <th>Default</th>
+  </tr>
+  <tr>
+    <td><code>PORT</code></td>
+    <td>Port to run the FastAPI app</td>
+    <td><code>8000</code></td>
+  </tr>
+  <tr>
+    <td><code>HOST</code></td>
+    <td>Host interface to bind to</td>
+    <td><code>0.0.0.0</code></td>
+  </tr>
+  <tr>
+    <td><code>REQUEST_TIMEOUT</code></td>
+    <td>Timeout for backend requests</td>
+    <td><code>15</code></td>
+  </tr>
+  <tr>
+    <td><code>LOG_LEVEL</code></td>
+    <td>Application logging level</td>
+    <td><code>INFO</code></td>
+  </tr>
+  <tr>
+    <td><code>MOVIEBOX_SECRET_KEY_DEFAULT</code></td>
+    <td>Default signing key</td>
+    <td>provided internally</td>
+  </tr>
+</table>
 
----
+## Development
 
-## For Developers (Manual Setup)
+The project uses `uv` for dependency management.
 
-If you want to modify the code or run it natively without Docker, you will need Python 3.11+.
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/mesamirh/stremio-moviebox.git
-   cd stremio-moviebox
-   ```
-2. **Install dependencies** (we recommend `uv` for speed, but `pip` works too!):
-   ```bash
-   uv sync
-   # OR: pip install -r requirements.txt
-   ```
-3. **Start the local server:**
-   ```bash
-   make start
-   ```
-   The Uvicorn server will boot up on `http://127.0.0.1:8000`.
-
----
-
-## Project Structure
-
-- **`server/`**: The FastAPI core. Manages routing, Stremio addon manifest generation, and serves the configuration Web UI.
-- **`streaming/`**: The processing engine. It translates Stremio's Cinemeta ID requests into MovieBox queries, parses the multi-API responses, filters out duplicates, and intelligently ranks streams based on user configuration.
-- **`moviebox/`**: The scraper clients. Contains the reverse-engineered API clients that securely authenticate and extract high-speed streaming links from MovieBox's v1 (Legacy), v2 (Web), and v3 (Mobile) endpoints concurrently.
-- **`web/`**: The frontend assets. Contains the HTML, CSS, and vanilla JavaScript that power the beautiful configuration dashboard.
-
----
-
-## Disclaimer
-
-This addon is built purely for educational purposes. It scrapes publicly available content from third-party APIs. The developers of this repository are not affiliated with MovieBox or Stremio in any capacity.
+1. Install `uv`: `pip install uv`
+2. Sync dependencies: `uv sync`
+3. Run the development server: `uv run fastapi dev server/app.py`

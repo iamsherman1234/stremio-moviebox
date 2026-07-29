@@ -1,8 +1,7 @@
-version: '3.8'
-
 services:
   stremio-moviebox:
     image: mesamirh/stremio-moviebox:latest
+    build: .
     container_name: stremio-moviebox
     restart: unless-stopped
     ports:
@@ -10,17 +9,6 @@ services:
     environment:
       - PORT=${PORT:-8000}
       - HOST=${HOST:-0.0.0.0}
-      - CACHE_TTL=${CACHE_TTL:-3600}
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-15}
-      - MAX_STREAMS=${MAX_STREAMS:-10}
-
-      - ENABLE_CACHE=${ENABLE_CACHE:-true}
-      - ENABLE_VALIDATION=${ENABLE_VALIDATION:-true}
-      - ENABLE_LOGGING=${ENABLE_LOGGING:-true}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${PORT:-8000}/manifest.json"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
+
