@@ -68,3 +68,13 @@ db.sqlite3-journal
 *.swo
 *~
 .DS_Store
+
+# Security & Secrets
+.env.*
+!.env.example
+*.key
+*.pem
+*_session.json
+*.session
+.mkvbase_profile/
+.mkvbase_profile_*
