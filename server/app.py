@@ -1,14 +1,29 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from config import settings
 from logger import logger
 from server.routes import router as main_router
 
-from fastapi.staticfiles import StaticFiles
-
 app = FastAPI(title="MovieBox Stremio Addon", version=settings.VERSION)
+
+@app.middleware("http")
+async def forwarded_headers_middleware(request: Request, call_next):
+    proto = request.headers.get("x-forwarded-proto")
+    if proto:
+        request.scope["scheme"] = proto
+    host = request.headers.get("x-forwarded-host")
+    if host:
+        new_headers = [
+            (k, v)
+            for k, v in request.scope.get("headers", [])
+            if k.lower() != b"host"
+        ]
+        new_headers.append((b"host", host.encode()))
+        request.scope["headers"] = new_headers
+    return await call_next(request)
 
 app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
