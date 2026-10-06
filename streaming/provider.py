@@ -5,7 +5,12 @@ from urllib.parse import urlparse
 
 from logger import logger
 from moviebox.client import MovieBoxClient
+from moviebox.models import VideoFileModel
 from moviebox.parser import MovieBoxParser
+from moviebox.utils import (
+    is_deprecation_notice_url,
+    resolve_dash_manifest_from_cookie,
+)
 
 TITLE_TAG_PATTERN = re.compile(r"\[(.*?)\]|\((.*?)\)")
 
@@ -90,54 +95,103 @@ async def find_all_matches(title: str, year: str, is_movie: bool, season: int = 
     return matches
 
 async def extract_streams(matches: list[dict[str, Any]], is_movie: bool, season: int = 1, episode: int = 1) -> list[dict[str, Any]]:
-    async def fetch_mobile(match):
+    async def fetch_match(match):
         parser = match["parser"]
         item = match["item"]
-        
         all_links = []
-        if is_movie:
-            resolutions_to_try = [0, 1080, 720, 480]
-            for res_type in resolutions_to_try:
+
+        se = 0 if is_movie else season
+        ep = 0 if is_movie else episode
+
+        # 1. Primary: Use play-info API (modern MovieBox backend with DASH manifests)
+        try:
+            info = await parser.get_play_info(str(item.subject_id), season=se, episode=ep)
+            streams = info.get("streams", [])
+            disp_res = info.get("displayResolutions", "")
+
+            for s in streams:
+                raw_url = str(s.get("url", ""))
+                cookie = str(s.get("signCookie", ""))
+                dash_url = resolve_dash_manifest_from_cookie(cookie)
+
+                if dash_url:
+                    play_url = dash_url
+                    fmt = "DASH"
+                elif not is_deprecation_notice_url(raw_url) and raw_url.startswith("http"):
+                    play_url = raw_url
+                    fmt = "MP4"
+                else:
+                    # Deprecated / placeholder notice URL - skip!
+                    continue
+
+                # Fetch subtitles for stream if available
+                stream_id = str(s.get("id", ""))
+                subtitles = []
                 try:
+                    subtitles = await parser.get_subtitles(str(item.subject_id), stream_id)
+                except Exception:
+                    pass
+
+                # Parse resolutions list (e.g. "1080,720,480")
+                res_str = s.get("resolutions") or disp_res or "1080"
+                res_list = []
+                for r in str(res_str).split(","):
+                    try:
+                        res_list.append(int(r.strip()))
+                    except ValueError:
+                        pass
+                if not res_list:
+                    res_list = [1080]
+                res_list.sort(reverse=True)
+
+                highest_res = res_list[0]
+                total_size = int(s.get("size") or 0)
+                codec = s.get("codecName") or "hevc"
+
+                for r in res_list:
+                    scaled_size = total_size if r == highest_res else int(total_size * ((r / highest_res) ** 1.6))
+                    all_links.append(VideoFileModel(
+                        url=play_url,
+                        resolution=r,
+                        size=scaled_size,
+                        source_url=raw_url,
+                        se=season,
+                        ep=episode,
+                        format=fmt,
+                        codec=codec,
+                        sign_cookie=cookie,
+                        subtitles=subtitles
+                    ))
+        except Exception as e:
+            logger.error(f"Error fetching play_info for {item.subject_id}: {e}")
+
+        # 2. Fallback: If no play_info streams found, try resource API
+        if not all_links:
+            try:
+                resolutions_to_try = [0, 1080, 720, 480] if is_movie else [1080, 720, 480, 0]
+                for res_type in resolutions_to_try:
                     res = await parser.get_download_links(
-                        subject_id=item.subject_id,
+                        subject_id=str(item.subject_id),
                         resolution=res_type,
                         is_movie=is_movie,
                         season=season,
                         episode=episode
                     )
-                    if res.file_list:
-                        all_links.extend(res.file_list)
+                    for file_item in res.file_list:
+                        if not is_movie:
+                            if file_item.se != season or file_item.ep != episode:
+                                continue
+                        if not is_deprecation_notice_url(str(file_item.url)):
+                            all_links.append(file_item)
+                    if all_links and is_movie:
                         break
-                except Exception as e:
-                    logger.error(f"Error fetching res {res_type} for {item.subject_id}: {e}")
-        else:
-            async def fetch_res(res_type):
-                try:
-                    res = await parser.get_download_links(
-                        subject_id=item.subject_id,
-                        resolution=res_type,
-                        is_movie=is_movie,
-                        season=season,
-                        episode=episode
-                    )
-                    return res.file_list
-                except Exception as e:
-                    logger.error(f"Error fetching res {res_type} for {item.subject_id}: {e}")
-                    return []
-                    
-            res_results = await asyncio.gather(*[fetch_res(r) for r in [1080, 720, 480, 0]])
-            for r_list in res_results:
-                for link in r_list:
-                    if not is_movie:
-                        if link.se != season or link.ep != episode:
-                            continue
-                    all_links.append(link)
-                    
+            except Exception as e:
+                logger.error(f"Error in fallback resource fetch for {item.subject_id}: {e}")
+
         return (all_links, match)
 
-    results = await asyncio.gather(*[fetch_mobile(m) for m in matches])
-    
+    results = await asyncio.gather(*[fetch_match(m) for m in matches])
+
     if matches:
         try:
             await matches[0]["client"].close()
@@ -166,7 +220,14 @@ def format_resolution(resolution: int) -> str:
     else:
         return f"{resolution}p"
 
-def generate_stream_description(size_bytes: int, audio_langs: list[str] = None, source_url: str = None, res_str: str = None) -> str:
+def generate_stream_description(
+    size_bytes: int,
+    audio_langs: list[str] = None,
+    source_url: str = None,
+    res_str: str = None,
+    format_type: str = "DASH",
+    codec: str = "hevc",
+) -> str:
     line1_parts = []
     
     if res_str:
@@ -179,6 +240,10 @@ def generate_stream_description(size_bytes: int, audio_langs: list[str] = None, 
         else:
             size_mb = size_bytes / (1024 ** 2)
             line1_parts.append(f"💾 {size_mb:.0f} MB")
+
+    if format_type == "DASH":
+        codec_label = codec.upper() if codec else "HEVC"
+        line1_parts.append(f"⚡ DASH ({codec_label})")
 
     lines = []
     if line1_parts:
@@ -224,7 +289,8 @@ def generate_stream_description(size_bytes: int, audio_langs: list[str] = None, 
 
 def get_stream_filename(url: str) -> str:
     url_str = str(url).lower()
-    for ext in ("mp4", "mkv", "avi", "webm", "m4v", "mov", "ts"):
+    for ext in ("mpd", "mp4", "mkv", "avi", "webm", "m4v", "mov", "ts"):
         if f".{ext}" in url_str:
             return f"stream.{ext}"
-    return "stream.mp4"
+    return "stream.mpd" if "dash" in url_str else "stream.mp4"
+

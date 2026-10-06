@@ -1,10 +1,11 @@
 from datetime import date
 from typing import Any, List, Optional
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class PagerModel(BaseModel):
+
     has_more: bool = Field(alias="hasMore", default=False)
     next_page: int = Field(alias="nextPage", default=1)
     page: int = 1
@@ -28,12 +29,18 @@ class SearchResultsModel(BaseModel):
     items: list[SubjectModel] = Field(default_factory=list)
 
 class VideoFileModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     resolution: int = 0
     size: int = 0
-    url: HttpUrl = Field(alias="resourceLink")
+    url: str = Field(alias="resourceLink", default="")
     source_url: str = Field(alias="sourceUrl", default="")
     se: int = 1
     ep: int = 1
+    format: str = "MP4"
+    codec: str = "hevc"
+    sign_cookie: str = ""
+    subtitles: list[dict] = Field(default_factory=list)
     
 class DownloadableFilesModel(BaseModel):
     pager: PagerModel

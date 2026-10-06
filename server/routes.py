@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Path, Request
 from fastapi.responses import StreamingResponse
 
 from logger import logger
+from moviebox.utils import b64_url_decode, b64_url_encode
 from server.manifest import Manifest, get_manifest
 from streaming.metadata import resolve_imdb_id
 from streaming.provider import (
@@ -20,6 +21,7 @@ from streaming.provider import (
 )
 
 router = APIRouter()
+
 
 def parse_config(config_str: str) -> dict:
     try:
@@ -44,11 +46,14 @@ async def manifest_endpoint_no_config(request: Request) -> Manifest:
     return manifest
 
 @router.get("/proxy/stream")
-async def proxy_stream(request: Request, d: str):
+async def proxy_stream(request: Request, d: str, c: str = ""):
     headers = {
         "User-Agent": "okhttp/4.12.0",
+        "Referer": "https://themoviebox.xyz/",
         "Accept": "*/*",
     }
+    if c:
+        headers["Cookie"] = c
     if "range" in request.headers:
         headers["Range"] = request.headers["range"]
 
@@ -57,8 +62,12 @@ async def proxy_stream(request: Request, d: str):
         req = client.build_request("GET", d, headers=headers)
         resp = await client.send(req, stream=True)
 
+        content_type = resp.headers.get("Content-Type", "video/mp4")
+        if d.endswith(".mpd"):
+            content_type = "application/dash+xml"
+
         response_headers = {
-            "Content-Type": resp.headers.get("Content-Type", "video/mp4"),
+            "Content-Type": content_type,
             "Accept-Ranges": "bytes",
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Headers": "*",
@@ -84,6 +93,67 @@ async def proxy_stream(request: Request, d: str):
     except Exception as e:
         await client.aclose()
         logger.error(f"Proxy stream error for {d}: {e}")
+        raise HTTPException(status_code=502, detail="Stream proxy error")
+
+@router.get("/proxy/dash/{b64_base}/{b64_cookie}/{filename}")
+async def proxy_dash(request: Request, b64_base: str, b64_cookie: str, filename: str):
+    try:
+        base_url = b64_url_decode(b64_base)
+        cookie = b64_url_decode(b64_cookie)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid proxy parameters")
+
+    target_url = f"{base_url}{filename}"
+    headers = {
+        "User-Agent": "okhttp/4.12.0",
+        "Cookie": cookie,
+        "Referer": "https://themoviebox.xyz/",
+        "Accept": "*/*",
+    }
+    if "range" in request.headers:
+        headers["Range"] = request.headers["range"]
+
+    client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
+    try:
+        req = client.build_request("GET", target_url, headers=headers)
+        resp = await client.send(req, stream=True)
+
+        content_type = resp.headers.get("Content-Type")
+        if not content_type or content_type == "application/octet-stream":
+            if filename.endswith(".mpd"):
+                content_type = "application/dash+xml"
+            elif filename.endswith(".m4s"):
+                content_type = "video/iso.segment"
+            else:
+                content_type = "video/mp4"
+
+        response_headers = {
+            "Content-Type": content_type,
+            "Accept-Ranges": "bytes",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
+        if "Content-Length" in resp.headers:
+            response_headers["Content-Length"] = resp.headers["Content-Length"]
+        if "Content-Range" in resp.headers:
+            response_headers["Content-Range"] = resp.headers["Content-Range"]
+
+        async def stream_generator():
+            try:
+                async for chunk in resp.aiter_bytes():
+                    yield chunk
+            finally:
+                await resp.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            stream_generator(),
+            status_code=resp.status_code,
+            headers=response_headers,
+        )
+    except Exception as e:
+        await client.aclose()
+        logger.error(f"Proxy dash error for {target_url}: {e}")
         raise HTTPException(status_code=502, detail="Stream proxy error")
 
 @router.get("/{config}/stream/{type}/{id}.json")
@@ -154,20 +224,21 @@ async def handle_stream(request: Request, type: str, id: str, config_str: str):
 
         url_str = str(dl.url)
         base_dl_url = url_str.split("?")[0] if "?" in url_str else url_str
-        
-        if base_dl_url not in merged_streams:
-            merged_streams[base_dl_url] = {
+        stream_key = (base_dl_url, dl.resolution)
+
+        if stream_key not in merged_streams:
+            merged_streams[stream_key] = {
                 "dl": dl,
                 "url_str": url_str,
                 "audio_langs": set(audio_langs)
             }
         else:
-            merged_streams[base_dl_url]["audio_langs"].update(audio_langs)
+            merged_streams[stream_key]["audio_langs"].update(audio_langs)
 
     base_url = str(request.base_url)
 
     streams = []
-    for base_dl_url, data in merged_streams.items():
+    for (base_dl_url, _res), data in merged_streams.items():
         dl = data["dl"]
         url_str = data["url_str"]
         audio_langs = list(data["audio_langs"])
@@ -184,12 +255,16 @@ async def handle_stream(request: Request, type: str, id: str, config_str: str):
 
         filename = get_stream_filename(url_str)
         res_str = format_resolution(resolution)
+        fmt = getattr(dl, "format", "DASH")
+        codec = getattr(dl, "codec", "hevc")
 
         desc = generate_stream_description(
             size,
             audio_langs=audio_langs,
             source_url=dl.source_url,
-            res_str=res_str
+            res_str=res_str,
+            format_type=fmt,
+            codec=codec,
         )
 
         domain = ""
@@ -199,7 +274,7 @@ async def handle_stream(request: Request, type: str, id: str, config_str: str):
                 domain = netloc.replace("www.", "").split(".")[0].capitalize()
         except Exception:
             pass
-            
+
         name_str = "MovieBox"
         if domain:
             name_str += f"\n🌐 {domain}"
@@ -207,8 +282,18 @@ async def handle_stream(request: Request, type: str, id: str, config_str: str):
         if layout == "torrentio":
             desc = desc.replace(" | ", "\n")
 
-        # 1. Direct Stream with okhttp User-Agent proxyHeaders (for Stremio apps)
-        streams.append({
+        # 1. Direct Stream with proxyHeaders (for Stremio apps & players)
+        req_headers = {
+            "User-Agent": "okhttp/4.12.0",
+            "Referer": "https://themoviebox.xyz/",
+            "Accept": "*/*",
+        }
+        sign_cookie = getattr(dl, "sign_cookie", "")
+        if sign_cookie:
+            req_headers["Cookie"] = sign_cookie
+            req_headers["X-MB-Token"] = sign_cookie
+
+        stream_obj = {
             "name": name_str,
             "title": desc,
             "url": url_str,
@@ -216,17 +301,26 @@ async def handle_stream(request: Request, type: str, id: str, config_str: str):
                 "notWebReady": False,
                 "filename": filename,
                 "proxyHeaders": {
-                    "request": {
-                        "User-Agent": "okhttp/4.12.0",
-                        "Accept": "*/*"
-                    }
+                    "request": req_headers
                 }
             },
-        })
+        }
+        if getattr(dl, "subtitles", None):
+            stream_obj["subtitles"] = dl.subtitles
+        streams.append(stream_obj)
 
-        # 2. Proxied Stream option via Addon Stream Proxy (for Web / CORS / clients blocking custom headers)
-        proxy_stream_url = f"{base_url}proxy/stream?d={quote(url_str)}"
-        streams.append({
+        # 2. Proxied Stream option via Addon Proxy
+        if fmt == "DASH" and sign_cookie:
+            base_cdn_url = url_str.rsplit("/", 1)[0] + "/"
+            b64_base = b64_url_encode(base_cdn_url)
+            b64_cookie = b64_url_encode(sign_cookie)
+            proxy_stream_url = f"{base_url}proxy/dash/{b64_base}/{b64_cookie}/index.mpd"
+        else:
+            proxy_stream_url = f"{base_url}proxy/stream?d={quote(url_str)}"
+            if sign_cookie:
+                proxy_stream_url += f"&c={quote(sign_cookie)}"
+
+        proxy_obj = {
             "name": f"{name_str} [Proxy]",
             "title": desc,
             "url": proxy_stream_url,
@@ -234,6 +328,10 @@ async def handle_stream(request: Request, type: str, id: str, config_str: str):
                 "notWebReady": False,
                 "filename": filename,
             },
-        })
+        }
+        if getattr(dl, "subtitles", None):
+            proxy_obj["subtitles"] = dl.subtitles
+        streams.append(proxy_obj)
 
     return {"streams": streams}
+
