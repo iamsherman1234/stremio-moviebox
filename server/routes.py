@@ -33,13 +33,13 @@ def parse_config(config_str: str) -> dict:
     except Exception:
         return {}
 
-@router.get("/{config}/manifest.json")
+@router.api_route("/{config}/manifest.json", methods=["GET", "HEAD"])
 async def manifest_endpoint(request: Request, config: str) -> Manifest:
     manifest = get_manifest()
     manifest.logo = str(request.base_url) + "logo.png"
     return manifest
 
-@router.get("/manifest.json")
+@router.api_route("/manifest.json", methods=["GET", "HEAD"])
 async def manifest_endpoint_no_config(request: Request) -> Manifest:
     manifest = get_manifest()
     manifest.logo = str(request.base_url) + "logo.png"

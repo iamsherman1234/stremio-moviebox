@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -8,6 +8,20 @@ from logger import logger
 from server.routes import router as main_router
 
 app = FastAPI(title="MovieBox Stremio Addon", version=settings.VERSION)
+
+@app.middleware("http")
+async def head_method_middleware(request: Request, call_next):
+    if request.method == "HEAD":
+        request.scope["method"] = "GET"
+        response = await call_next(request)
+        return Response(
+            content=b"",
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+            background=response.background,
+        )
+    return await call_next(request)
 
 @app.middleware("http")
 async def forwarded_headers_middleware(request: Request, call_next):
@@ -37,7 +51,7 @@ app.add_middleware(
 
 app.include_router(main_router)
 
-@app.get("/", response_class=HTMLResponse)
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root():
     return """
     <!DOCTYPE html>
@@ -226,11 +240,11 @@ async def root():
     </html>
     """
 
-@app.get("/logo.png")
+@app.api_route("/logo.png", methods=["GET", "HEAD"])
 async def get_logo():
     return FileResponse("assets/logo.png", media_type="image/png")
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy"}
 
